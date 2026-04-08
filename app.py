@@ -292,22 +292,27 @@ if run_clicked and question.strip():
     else:
         st.info("Showing table only for this query shape.")
 
-    if result.chart_reason:
+    chart_reason = getattr(result, "chart_reason", "")
+    chart_explanation = getattr(result, "chart_explanation", "")
+    auto_insights = getattr(result, "auto_insights", [])
+    business_suggestions = getattr(result, "business_suggestions", [])
+
+    if chart_reason:
         st.markdown("### Why This Chart")
-        st.write(result.chart_reason)
+        st.write(chart_reason)
 
-    if result.chart_explanation:
+    if chart_explanation:
         st.markdown("### What This Means (Plain English)")
-        st.write(result.chart_explanation)
+        st.write(chart_explanation)
 
-    if result.auto_insights:
+    if auto_insights:
         st.markdown("### Auto Insights")
-        for insight in result.auto_insights:
+        for insight in auto_insights:
             st.markdown(f"- {insight}")
 
-    if result.business_suggestions:
+    if business_suggestions:
         st.markdown("### Business Suggestions")
-        for suggestion in result.business_suggestions:
+        for suggestion in business_suggestions:
             st.markdown(f"- {suggestion}")
 
 if st.session_state.history:
