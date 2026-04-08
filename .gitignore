@@ -7,3 +7,4 @@ instacart.duckdb
 instacart.duckdb.wal
 data/*.csv
 .vscode/
+runtime/

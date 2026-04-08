@@ -1,4 +1,5 @@
 import os
+import uuid
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -10,7 +11,7 @@ try:
 except Exception:  # pragma: no cover
     load_dotenv = None
 
-from bi_agent import ConversationalBIAgent
+from bi_agent import ConversationalBIAgent, DatasetProfile
 
 
 def _load_local_env() -> None:
@@ -26,18 +27,84 @@ def _load_local_env() -> None:
         load_dotenv(env_example_file, override=False)
 
 
+def _ensure_session_state() -> None:
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = uuid.uuid4().hex
+    if "history" not in st.session_state:
+        st.session_state.history = []
+    if "active_dataset_label" not in st.session_state:
+        st.session_state.active_dataset_label = "Bundled Instacart dataset"
+
+
+def _runtime_dir() -> Path:
+    runtime = Path(__file__).resolve().parent / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    return runtime
+
+
+def _session_dir() -> Path:
+    session_root = _runtime_dir() / st.session_state.session_id
+    session_root.mkdir(parents=True, exist_ok=True)
+    return session_root
+
+
+def _save_uploaded_files(uploaded_files) -> list[str]:
+    upload_dir = _session_dir() / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[str] = []
+    for uploaded_file in uploaded_files:
+        destination = upload_dir / uploaded_file.name
+        destination.write_bytes(uploaded_file.getbuffer())
+        saved_paths.append(str(destination))
+    return saved_paths
+
+
 _load_local_env()
 
-st.set_page_config(page_title="Instacart Conversational BI", layout="wide")
-st.title("Instacart Conversational BI Agent")
+st.set_page_config(page_title="Live Conversational BI", layout="wide")
+_ensure_session_state()
+
+
+@st.cache_resource(show_spinner=False)
+def get_agent(session_id: str) -> ConversationalBIAgent:
+    session_root = _runtime_dir() / session_id
+    session_root.mkdir(parents=True, exist_ok=True)
+    db_path = session_root / "workspace.duckdb"
+    return ConversationalBIAgent(data_dir="data", db_path=str(db_path))
+
+
+agent = get_agent(st.session_state.session_id)
+
+st.title("Live Conversational BI Agent")
 st.caption(
-    "Ask plain-English questions. The agent generates SQL over all 6 CSV tables, "
-    "executes it in DuckDB, and returns charts + tables."
+    "Upload CSV, Parquet, or DuckDB files. Large CSVs are chunked into partitions inside DuckDB "
+    "so the app can stay responsive while keeping the same chat-to-SQL workflow."
 )
 
 with st.sidebar:
-    st.header("Settings")
-    data_dir = st.text_input("Data directory", value="data")
+    st.header("Data Setup")
+    data_mode = st.radio(
+        "Dataset source",
+        options=["Use bundled Instacart data", "Upload my files"],
+    )
+    partition_size_rows = st.number_input(
+        "Partition size for CSV rows",
+        min_value=50_000,
+        max_value=2_000_000,
+        value=500_000,
+        step=50_000,
+        help="Large CSV files are ingested in row-based partitions of this size.",
+    )
+    uploaded_files = st.file_uploader(
+        "Upload dataset files",
+        type=["csv", "parquet", "duckdb", "db"],
+        accept_multiple_files=True,
+        disabled=data_mode != "Upload my files",
+    )
+    prepare_clicked = st.button("Prepare Dataset", type="primary")
+    clear_clicked = st.button("Clear Conversation")
+
+    st.header("LLM Settings")
     gemini_model = st.text_input(
         "Gemini model", value=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"), key="gemini_model"
     )
@@ -47,9 +114,7 @@ with st.sidebar:
     groq_model = st.text_input(
         "Groq model", value=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), key="groq_model"
     )
-    st.info(
-        "Provider order: GEMINI_API_KEY -> OPENAI_API_KEY -> GROQ_API_KEY -> built-in SQL heuristics."
-    )
+
     if os.getenv("GEMINI_API_KEY"):
         st.success("Gemini key detected.")
     elif os.getenv("OPENAI_API_KEY"):
@@ -57,39 +122,86 @@ with st.sidebar:
     elif os.getenv("GROQ_API_KEY"):
         st.warning("Gemini/OpenAI keys not found. Using Groq key fallback.")
     else:
-        st.warning("No API key found. Using built-in SQL heuristics.")
-    st.markdown("### Example prompts")
-    st.markdown("- Top departments by reorder rate")
-    st.markdown("- Orders by hour of day")
-    st.markdown("- Show aisles with highest reorder rate and avg basket position")
-    st.markdown("- Top products by times ordered and reorder rate")
+        st.warning("No API key found. The app will rely on built-in SQL heuristics.")
 
-# Keep selected model names active for this Streamlit session.
 os.environ["GEMINI_MODEL"] = gemini_model
 os.environ["OPENAI_MODEL"] = openai_model
 os.environ["GROQ_MODEL"] = groq_model
 
-
-@st.cache_resource(show_spinner=False)
-def get_agent(_data_dir: str) -> ConversationalBIAgent:
-    return ConversationalBIAgent(data_dir=_data_dir, db_path="instacart.duckdb")
-
-
-agent = get_agent(data_dir)
-
-if "history" not in st.session_state:
+if clear_clicked:
     st.session_state.history = []
+    st.rerun()
+
+if prepare_clicked:
+    try:
+        with st.spinner("Preparing dataset..."):
+            if data_mode == "Use bundled Instacart data":
+                profile = agent.load_default_instacart()
+            else:
+                if not uploaded_files:
+                    raise ValueError("Upload at least one CSV, Parquet, or DuckDB file first.")
+                saved_paths = _save_uploaded_files(uploaded_files)
+                profile = agent.register_data_files(
+                    saved_paths,
+                    dataset_label="User uploaded dataset",
+                    partition_size_rows=int(partition_size_rows),
+                )
+        if not profile.is_ready:
+            raise ValueError("No supported tables were loaded.")
+        st.session_state.history = []
+        st.session_state.active_dataset_label = profile.dataset_label
+        st.success(f"Prepared {len(profile.tables)} table(s) for analysis.")
+    except Exception as exc:
+        st.error(f"Dataset preparation failed: {exc}")
+
+profile: DatasetProfile = agent.dataset_profile
+
+if profile.is_ready:
+    st.subheader("Active Dataset")
+    st.write(profile.dataset_label)
+    summary_rows = [
+        {
+            "table": table.table_name,
+            "source": table.source_name,
+            "format": table.source_format,
+            "rows": table.row_count,
+            "partitioned": "Yes" if table.partitioned else "No",
+            "partitions": table.partition_count,
+        }
+        for table in profile.tables
+    ]
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+    if profile.relationships:
+        st.markdown("### Detected Relationships")
+        relationship_rows = [
+            {
+                "left_table": rel.left_table,
+                "left_column": rel.left_column,
+                "right_table": rel.right_table,
+                "right_column": rel.right_column,
+                "confidence": rel.confidence,
+                "reason": rel.reason,
+            }
+            for rel in profile.relationships
+        ]
+        st.dataframe(pd.DataFrame(relationship_rows), use_container_width=True)
+    for note in profile.notes:
+        st.info(note)
+else:
+    st.info("Prepare a dataset from the sidebar to start querying.")
 
 question = st.text_input(
     "Your question",
-    placeholder="Example: Which departments have the highest reorder rate?",
+    placeholder="Example: Show top categories by sales, or list the tables in my upload",
+    disabled=not profile.is_ready,
 )
 
-col_run, col_clear = st.columns([1, 1])
-run_clicked = col_run.button("Run Query", type="primary")
-clear_clicked = col_clear.button("Clear Conversation")
+col_run, col_reset_dataset = st.columns([1, 1])
+run_clicked = col_run.button("Run Query", type="primary", disabled=not profile.is_ready)
+reset_dataset_clicked = col_reset_dataset.button("Reset Dataset")
 
-if clear_clicked:
+if reset_dataset_clicked:
+    agent.reset_dataset()
     st.session_state.history = []
     st.rerun()
 
@@ -115,8 +227,8 @@ if run_clicked and question.strip():
     try:
         with st.spinner("Generating SQL and running query..."):
             result = agent.ask(question.strip(), st.session_state.history)
-    except Exception as e:
-        st.error(f"Query failed: {e}")
+    except Exception as exc:
+        st.error(f"Query failed: {exc}")
         st.stop()
 
     st.session_state.history.append(
@@ -135,10 +247,7 @@ if run_clicked and question.strip():
     st.code(result.sql, language="sql")
 
     st.subheader("Result")
-    try:
-        st.dataframe(result.df, use_container_width=True)
-    except TypeError:
-        st.dataframe(result.df)
+    st.dataframe(result.df, use_container_width=True)
 
     x, y = _pick_xy(result.df)
     if result.chart_type == "bar" and x and y:
