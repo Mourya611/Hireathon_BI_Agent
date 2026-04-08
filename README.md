@@ -25,6 +25,7 @@ It then creates a logical view like `sales` over those partitions, so the BI age
 ## Current Capabilities
 
 - conversational BI over uploaded datasets
+- natural-language query to DuckDB SQL
 - schema discovery from uploaded files
 - partitioned ingestion for big CSV files
 - automatic column profiling for numeric, categorical, and temporal fields
@@ -32,6 +33,8 @@ It then creates a logical view like `sales` over those partitions, so the BI age
 - metadata queries like tables, columns, and row counts
 - chart selection for common query shapes
 - plain-English chart explanation
+- automatic insight generation from query results
+- business suggestions based on the returned result
 - provider fallback: `Gemini`, `OpenAI`, `Groq`, then built-in heuristics
 
 ## Supported Upload Formats
@@ -110,6 +113,7 @@ Use `.env` for local secrets. `.env.example` is only a template.
 - `what relationships did you detect`
 - `show monthly revenue trend`
 - `top customers by total sales`
+- `what should I focus on based on this result`
 - `top departments by reorder rate`
 - `orders by hour of day`
 - `show the first 20 rows from customers`
@@ -119,4 +123,5 @@ Use `.env` for local secrets. `.env.example` is only a template.
 - Instacart-specific heuristics still work when that schema is loaded.
 - Generic uploaded datasets work best when an LLM key is configured, because joins and business logic can vary from one schema to another.
 - The UI now shows detected relationships to help users understand how uploaded tables may connect.
+- Query results now include auto-insights and business suggestions to make the app feel more like a BI agent than a raw dashboard.
 - Runtime upload artifacts are written to `runtime/` and ignored by git.

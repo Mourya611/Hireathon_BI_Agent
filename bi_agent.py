@@ -47,6 +47,9 @@ class QueryResult:
     df: pd.DataFrame
     chart_type: str
     chart_explanation: str = ""
+    chart_reason: str = ""
+    auto_insights: List[str] = field(default_factory=list)
+    business_suggestions: List[str] = field(default_factory=list)
     notes: str = ""
 
 
@@ -413,6 +416,20 @@ class ConversationalBIAgent:
 
         return relationships[:20]
 
+    def _relationship_query_df(self) -> pd.DataFrame:
+        rows = [
+            {
+                "left_table": rel.left_table,
+                "left_column": rel.left_column,
+                "right_table": rel.right_table,
+                "right_column": rel.right_column,
+                "confidence": rel.confidence,
+                "reason": rel.reason,
+            }
+            for rel in self.dataset_profile.relationships
+        ]
+        return pd.DataFrame(rows)
+
     def schema_context(self) -> str:
         if not self.dataset_profile.tables:
             return "No dataset is loaded yet."
@@ -605,6 +622,13 @@ LIMIT 20
 
         if not table_names:
             raise ValueError("No dataset is loaded. Upload data before asking questions.")
+
+        if "relationship" in q or "join suggestion" in q or "how tables connect" in q:
+            return """
+SELECT
+  'Use the Detected Relationships panel in the app for join candidates.' AS message
+LIMIT 1
+""".strip()
 
         if any(token in q for token in ("list of tables", "list tables", "show tables", "what tables")):
             return """
@@ -1152,17 +1176,257 @@ Sample rows (CSV):
 
         return "table"
 
+    def explain_chart_choice(self, question: str, df: pd.DataFrame, chart_type: str) -> str:
+        if chart_type == "table":
+            return "A table is the safest choice here because the result shape does not strongly signal a single dominant chart."
+        if chart_type == "line":
+            return "A line chart fits because the result looks time-based and is best read as a trend over ordered periods."
+        if chart_type == "bar":
+            return "A bar chart fits because the result compares categories against a numeric metric."
+        if chart_type == "histogram":
+            return "A histogram fits because the result is focused on the distribution of a numeric field."
+        if chart_type == "scatter":
+            return "A scatter chart fits because the result compares two numeric measures for relationship patterns."
+        if chart_type == "pie":
+            return "A pie chart fits because the result has a small number of categories and reads like a composition breakdown."
+        return f"The selected chart is {chart_type} based on the result shape."
+
+    def _local_auto_insights(self, question: str, df: pd.DataFrame) -> List[str]:
+        if df.empty:
+            return ["No rows were returned, so there is no measurable pattern to summarize yet."]
+
+        insights: List[str] = []
+        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        non_numeric_cols = [c for c in df.columns if c not in numeric_cols]
+
+        if numeric_cols:
+            metric_col = numeric_cols[0]
+            metric_series = df[metric_col].dropna()
+            if not metric_series.empty:
+                insights.append(
+                    f"The main metric is '{metric_col}' with an average of {metric_series.mean():.2f} across {len(metric_series)} rows."
+                )
+                max_idx = metric_series.idxmax()
+                min_idx = metric_series.idxmin()
+                if non_numeric_cols:
+                    label_col = non_numeric_cols[0]
+                    insights.append(
+                        f"Highest {metric_col} appears in '{df.loc[max_idx, label_col]}' and lowest appears in '{df.loc[min_idx, label_col]}'."
+                    )
+                else:
+                    insights.append(
+                        f"The metric ranges from {metric_series.min():.2f} to {metric_series.max():.2f}."
+                    )
+
+                if len(metric_series) >= 2:
+                    pct_change = ((metric_series.iloc[-1] - metric_series.iloc[0]) / abs(metric_series.iloc[0])) * 100 if metric_series.iloc[0] not in (0, 0.0) else None
+                    if pct_change is not None:
+                        direction = "increased" if pct_change >= 0 else "decreased"
+                        insights.append(
+                            f"From the first visible row to the last, '{metric_col}' {direction} by {abs(pct_change):.1f}%."
+                        )
+
+        if len(numeric_cols) >= 2:
+            corr = df[numeric_cols[:2]].corr().iloc[0, 1]
+            if pd.notna(corr):
+                if abs(corr) >= 0.7:
+                    strength = "strong"
+                elif abs(corr) >= 0.4:
+                    strength = "moderate"
+                else:
+                    strength = "weak"
+                direction = "positive" if corr >= 0 else "negative"
+                insights.append(
+                    f"There is a {strength} {direction} relationship between '{numeric_cols[0]}' and '{numeric_cols[1]}' in the returned result."
+                )
+
+        if not insights:
+            insights.append(f"The query answered '{question}' and returned {len(df)} rows for review.")
+
+        return insights[:4]
+
+    def _local_business_suggestions(self, question: str, df: pd.DataFrame) -> List[str]:
+        if df.empty:
+            return ["Widen the filter or verify the dataset fields before making a business decision."]
+
+        suggestions: List[str] = []
+        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        non_numeric_cols = [c for c in df.columns if c not in numeric_cols]
+        q = question.lower()
+
+        if numeric_cols and non_numeric_cols:
+            metric_col = numeric_cols[0]
+            label_col = non_numeric_cols[0]
+            metric_series = df[metric_col].dropna()
+            if not metric_series.empty:
+                top_idx = metric_series.idxmax()
+                low_idx = metric_series.idxmin()
+                suggestions.append(
+                    f"Prioritize the category '{df.loc[top_idx, label_col]}' as it currently leads on '{metric_col}'."
+                )
+                suggestions.append(
+                    f"Review the category '{df.loc[low_idx, label_col]}' for possible underperformance or missed opportunity."
+                )
+
+        if any(word in q for word in ("trend", "month", "week", "day", "time")) and numeric_cols:
+            suggestions.append(
+                "Track the same metric over the next period and set an alert for sharp movement so the trend becomes actionable."
+            )
+
+        if any(word in q for word in ("customer", "region", "product", "sales", "revenue")):
+            suggestions.append(
+                "Use the top-performing segment from this result as the first target for marketing, pricing, or inventory follow-up."
+            )
+
+        if not suggestions:
+            suggestions.append(
+                "Use this result to decide which segment deserves deeper drill-down rather than treating all categories equally."
+            )
+
+        return suggestions[:3]
+
+    def generate_insights(self, question: str, df: pd.DataFrame) -> List[str]:
+        local_insights = self._local_auto_insights(question, df)
+        if df.empty:
+            return local_insights
+
+        sample_text = df.head(12).to_csv(index=False)
+        prompt = f"""
+You are an AI BI analyst.
+Write 3 short business insights as bullet-style sentences.
+Ground them only in the result data provided.
+Do not mention SQL or database details.
+
+Question: {question}
+Columns: {list(df.columns)}
+Rows in full result: {len(df)}
+Sample rows (CSV):
+{sample_text}
+""".strip()
+
+        gemini_text = self._gemini_text(prompt)
+        if gemini_text:
+            lines = [line.strip("- ").strip() for line in gemini_text.splitlines() if line.strip()]
+            if lines:
+                return lines[:3]
+
+        openai_text, _ = self._openai_compatible_text(
+            provider_name="OpenAI",
+            api_key_env="OPENAI_API_KEY",
+            model_env="OPENAI_MODEL",
+            default_model="gpt-5-mini",
+            base_url_env=None,
+            prompt=prompt,
+        )
+        if openai_text:
+            lines = [line.strip("- ").strip() for line in openai_text.splitlines() if line.strip()]
+            if lines:
+                return lines[:3]
+
+        groq_text, _ = self._openai_compatible_text(
+            provider_name="Groq",
+            api_key_env="GROQ_API_KEY",
+            model_env="GROQ_MODEL",
+            default_model="openai/gpt-oss-120b",
+            base_url_env="GROQ_BASE_URL",
+            prompt=prompt,
+        )
+        if groq_text:
+            lines = [line.strip("- ").strip() for line in groq_text.splitlines() if line.strip()]
+            if lines:
+                return lines[:3]
+
+        return local_insights
+
+    def generate_business_suggestions(self, question: str, df: pd.DataFrame) -> List[str]:
+        local_suggestions = self._local_business_suggestions(question, df)
+        if df.empty:
+            return local_suggestions
+
+        sample_text = df.head(12).to_csv(index=False)
+        prompt = f"""
+You are an AI business advisor.
+Write 2 or 3 concrete business recommendations based only on the result data.
+Keep them short, practical, and decision-oriented.
+Do not invent missing facts.
+
+Question: {question}
+Columns: {list(df.columns)}
+Rows in full result: {len(df)}
+Sample rows (CSV):
+{sample_text}
+""".strip()
+
+        gemini_text = self._gemini_text(prompt)
+        if gemini_text:
+            lines = [line.strip("- ").strip() for line in gemini_text.splitlines() if line.strip()]
+            if lines:
+                return lines[:3]
+
+        openai_text, _ = self._openai_compatible_text(
+            provider_name="OpenAI",
+            api_key_env="OPENAI_API_KEY",
+            model_env="OPENAI_MODEL",
+            default_model="gpt-5-mini",
+            base_url_env=None,
+            prompt=prompt,
+        )
+        if openai_text:
+            lines = [line.strip("- ").strip() for line in openai_text.splitlines() if line.strip()]
+            if lines:
+                return lines[:3]
+
+        groq_text, _ = self._openai_compatible_text(
+            provider_name="Groq",
+            api_key_env="GROQ_API_KEY",
+            model_env="GROQ_MODEL",
+            default_model="openai/gpt-oss-120b",
+            base_url_env="GROQ_BASE_URL",
+            prompt=prompt,
+        )
+        if groq_text:
+            lines = [line.strip("- ").strip() for line in groq_text.splitlines() if line.strip()]
+            if lines:
+                return lines[:3]
+
+        return local_suggestions
+
     def ask(self, question: str, history: List[Dict[str, str]]) -> QueryResult:
         if not self.dataset_profile.is_ready:
             raise ValueError("No dataset is prepared yet.")
+        if "relationship" in question.lower() or "join suggestion" in question.lower() or "how tables connect" in question.lower():
+            df = self._relationship_query_df()
+            chart = "table"
+            return QueryResult(
+                question=question,
+                sql="In-app relationship summary",
+                df=df,
+                chart_type=chart,
+                chart_explanation="These inferred relationships show how uploaded tables may connect for cross-table analysis.",
+                chart_reason="A table fits best because relationship candidates are metadata, not a numeric distribution.",
+                auto_insights=[
+                    f"Detected {len(df)} likely table relationships." if not df.empty else "No likely table relationships were detected yet.",
+                    "High-confidence relationships usually come from shared key-like columns such as *_id.",
+                ],
+                business_suggestions=[
+                    "Use the highest-confidence relationship first when building multi-table questions.",
+                    "If an expected relationship is missing, rename columns or upload cleaner keys to improve join detection.",
+                ],
+            )
         sql, df, notes = self.execute_with_retry(question, history)
         chart = self.choose_chart(question, df)
         chart_explanation = self.explain_chart(question=question, df=df, chart_type=chart)
+        chart_reason = self.explain_chart_choice(question=question, df=df, chart_type=chart)
+        auto_insights = self.generate_insights(question=question, df=df)
+        business_suggestions = self.generate_business_suggestions(question=question, df=df)
         return QueryResult(
             question=question,
             sql=sql,
             df=df,
             chart_type=chart,
             chart_explanation=chart_explanation,
+            chart_reason=chart_reason,
+            auto_insights=auto_insights,
+            business_suggestions=business_suggestions,
             notes=notes,
         )

@@ -80,6 +80,9 @@ st.caption(
     "Upload CSV, Parquet, or DuckDB files. Large CSVs are chunked into partitions inside DuckDB "
     "so the app can stay responsive while keeping the same chat-to-SQL workflow."
 )
+st.markdown(
+    "Ask business questions in plain English and get SQL, charts, auto insights, and decision-oriented recommendations."
+)
 
 with st.sidebar:
     st.header("Data Setup")
@@ -289,9 +292,23 @@ if run_clicked and question.strip():
     else:
         st.info("Showing table only for this query shape.")
 
+    if result.chart_reason:
+        st.markdown("### Why This Chart")
+        st.write(result.chart_reason)
+
     if result.chart_explanation:
         st.markdown("### What This Means (Plain English)")
         st.write(result.chart_explanation)
+
+    if result.auto_insights:
+        st.markdown("### Auto Insights")
+        for insight in result.auto_insights:
+            st.markdown(f"- {insight}")
+
+    if result.business_suggestions:
+        st.markdown("### Business Suggestions")
+        for suggestion in result.business_suggestions:
+            st.markdown(f"- {suggestion}")
 
 if st.session_state.history:
     st.subheader("Conversation Memory")
