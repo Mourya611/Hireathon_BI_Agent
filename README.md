@@ -27,14 +27,12 @@ It then creates a logical view like `sales` over those partitions, so the BI age
 - conversational BI over uploaded datasets
 - schema discovery from uploaded files
 - partitioned ingestion for big CSV files
+- automatic column profiling for numeric, categorical, and temporal fields
+- likely relationship detection across uploaded tables
 - metadata queries like tables, columns, and row counts
 - chart selection for common query shapes
 - plain-English chart explanation
-- provider fallback:
-  - `Gemini`
-  - `OpenAI`
-  - `Groq`
-  - built-in heuristics
+- provider fallback: `Gemini`, `OpenAI`, `Groq`, then built-in heuristics
 
 ## Supported Upload Formats
 
@@ -65,16 +63,21 @@ streamlit run app.py
 
 The app is prepared for Streamlit-style or Procfile-based deployment.
 
+Repository: `https://github.com/Mourya611/Hireathon_BI_Agent`
+
+Current deployment branch: `codex/live-bi-upload-deploy`
+
 ### Streamlit Community Cloud
 
 1. Push this repository to GitHub.
 2. In Streamlit Community Cloud, create a new app from the repo.
-3. Set the main file to `app.py`.
-4. Add secrets in the app settings if you want LLM-backed SQL generation:
-   - `GEMINI_API_KEY`
-   - `OPENAI_API_KEY`
-   - `GROQ_API_KEY`
-5. Deploy.
+3. Select the branch `codex/live-bi-upload-deploy` or merge that branch into `main`.
+4. Set the main file to `app.py`.
+5. Add secrets in the app settings if you want LLM-backed SQL generation:
+- `GEMINI_API_KEY`
+- `OPENAI_API_KEY`
+- `GROQ_API_KEY`
+6. Deploy.
 
 ### Render / Railway / Similar Platforms
 
@@ -104,6 +107,9 @@ Use `.env` for local secrets. `.env.example` is only a template.
 - `list the tables in my upload`
 - `show the columns in the sales table`
 - `rows in each table`
+- `what relationships did you detect`
+- `show monthly revenue trend`
+- `top customers by total sales`
 - `top departments by reorder rate`
 - `orders by hour of day`
 - `show the first 20 rows from customers`
@@ -112,4 +118,5 @@ Use `.env` for local secrets. `.env.example` is only a template.
 
 - Instacart-specific heuristics still work when that schema is loaded.
 - Generic uploaded datasets work best when an LLM key is configured, because joins and business logic can vary from one schema to another.
+- The UI now shows detected relationships to help users understand how uploaded tables may connect.
 - Runtime upload artifacts are written to `runtime/` and ignored by git.
